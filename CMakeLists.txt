@@ -13,8 +13,8 @@ set(SOURCES
     src/file/loader.c
     src/file/dumper.c
     src/sequential/sequential.c
-    src/setup.c
-    src/sad.c
+    src/sequential/setup.c
+    src/sequential/sad.c
 )
 
 # Add executable

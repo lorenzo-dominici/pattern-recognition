@@ -2,7 +2,7 @@
 #include "sad.h"
 
 // Function to compute the Sum of Absolute Differences (SAD) between a time series and a query
-void seq_sad(float* ts, float* query, int ts_length, int query_length, float* result) {
+void sad(float* ts, float* query, int ts_length, int query_length, float* result) {
     // Calculate the number of possible positions the query can be aligned with the time series
     int length = ts_length - query_length + 1;
 

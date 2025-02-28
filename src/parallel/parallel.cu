@@ -1,52 +1,51 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <windows.h>
-#include "sequential.h"
+#include <cuda_runtime.h>
 #include "../model/dataset.h"
-#include "../file/loader.h"
-#include "../file/dumper.h"
-#include "setup.h"
-#include "sad.h"
 
-// Function to run the sequential algorithm
-void seq_run(dataset_t* db, dataset_t* queries, dataset_t* results, float* times) {
-    float avg_time = 0;
-    LARGE_INTEGER frequency, start, end;
-    QueryPerformanceFrequency(&frequency);
-    printf("ETA: estimating...\n");
-    
-    // Loop through each query
-    for (int i = 0; i < queries->lengths[0]; i++) {
-        QueryPerformanceCounter(&start);
-        
-        // Loop through each database entry
-        for (int j = 0; j < db->lengths[0]; j++) {
-            // Perform the SAD operation
-            sad(((float**)(db->data))[j], ((float**)(queries->data))[i], db->lengths[1], queries->lengths[1], ((float***)(results->data))[i][j]);
-        }
-        
-        QueryPerformanceCounter(&end);
-        times[i] = (float)(end.QuadPart - start.QuadPart) / frequency.QuadPart;
-        
-        // Calculate average time
-        if (i == 0) {
-            avg_time = times[i];
-        } else {
-            avg_time = (avg_time * i + times[i]) / (i + 1);
-        }
-        
-        // Estimate time remaining
-        float eta = avg_time * (queries->lengths[0] - i - 1);
-        printf("\033[F\033[2K\rETA: %.2f seconds\n", eta);
+// CUDA kernel to compute SAD
+__global__ void sad_kernel(float* d_db, float* d_queries, float* d_results, int db_size, int query_size) {
+    // TODO: Implement this
+}
+
+// Function to run the parallel pattern recognition algorithm
+void par_run(dataset_t* db, dataset_t* queries, dataset_t* results, float* times) {
+    unsigned int db_x = db->lengths[0];
+    unsigned int db_y = db->lengths[1];
+    unsigned int qs_x = queries->lengths[0];
+    unsigned int qs_y = queries->lengths[1];
+    unsigned int rs_z = results->lengths[2];
+
+    // Allocate device memory
+    float *d_db, *d_qs, *d_rs;
+    cudaMalloc((void**)&d_db, db_x * db_y * sizeof(float));
+    cudaMalloc((void**)&d_qs, qs_x * qs_y * sizeof(float));
+    cudaMalloc((void**)&d_rs, qs_x * db_x * rs_z * sizeof(float));
+
+    // Copy data to device
+    for (int i = 0; i < db_x; i++) {
+        cudaMemcpy(d_db + i * db_x, db->data + i * db_x, db_y * sizeof(float), cudaMemcpyHostToDevice);
     }
-    
-    // Calculate total elapsed time
-    float elapsed = 0.0;
-    for (int i = 0; i < queries->lengths[0]; i++) {
-        elapsed += times[i];
+    for (int i = 0; i < qs_x; i++) {
+        cudaMemcpy(d_qs + i * qs_x, queries->data + i * qs_x, qs_y * sizeof(float), cudaMemcpyHostToDevice);
     }
-    printf("\033[F\033[2K\rElapsed time: %.6f seconds\n", elapsed);
+
+    // Launch kernel
+    int blockSize = 256; // TODO: Tune this
+    int numBlocks = (db_size - query_size + 1 + blockSize - 1) / blockSize; // TODO: Tune this
+    for (int i = 0; i < n_runs; i++) {
+        computeSADKernel<<<numBlocks, blockSize>>>(d_db, d_queries, d_results, db_size, query_size);
+    }
+
+    // Copy results back to host
+    for (int i = 0; i < qs_x; i++) {
+        for (int j = 0; j < db_x; j++) {
+            cudaMemcpy(results->data + i * qs_x * db_x + j * db_x, d_results + i * qs_x * db_x + j * db_x, rs_z * sizeof(float), cudaMemcpyDeviceToHost);
+        }
+    }
+
+    // Free device memory
+    cudaFree(d_db);
+    cudaFree(d_qs);
+    cudaFree(d_rs);
 }
 
 int main(int argc, char* argv[]) {
@@ -114,15 +113,13 @@ int main(int argc, char* argv[]) {
     }
     printf("Times defined with dimensions %d x %d\n", times->lengths[0], times->lengths[1]);
 
-    // Run the sequential algorithm multiple times
+    // Run the parallel algorithm multiple times
     printf("Running %d times...\n", n_runs);
-    for (int i = 0; i < n_runs; i++) {
-        seq_run(db, queries, results, ((float**)(times->data))[i]);
-    }
+    par_run(db, queries, results, ((float**)(times->data))[i], n_runs);
 
     // Dump timing data to file
-    printf("Dumping timing data to %s...\n", "data/seq_times.csv");
-    dump_dataset(times, "data/seq_times.csv");
+    printf("Dumping timing data to %s...\n", "data/par_times.csv");
+    dump_dataset(times, "data/par_times.csv");
 
     // Clean up
     printf("Cleaning...\n");
