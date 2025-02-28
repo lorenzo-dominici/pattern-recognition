@@ -1,0 +1,4 @@
+.vscode/
+build/
+data/seq_times.csv
+data/par_times.csv
