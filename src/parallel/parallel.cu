@@ -1,43 +1,52 @@
 #include <cuda_runtime.h>
 #include "../model/dataset.h"
 
+#define WARP 32
+#define TPB 960
+#define WPB TPB / WARP
+#define DLS TPB - 2 * WARP
+#define QLS TPB - WARP
+
 // CUDA kernel to compute SAD
 __global__ void sad_kernel(float* d_db, float* d_qs, float* d_rs, int db_x, int db_y, int qs_x) {
     __shared__ float Q[2 * WARP];
-    __shared__ float D[blockDim.x];
+    __shared__ float D[TPB];
 
     int t = threadIdx.x;
     int d = blockIdx.x + blockIdx.y * gridDim.x + blockIdx.z * gridDim.x * gridDim.y;
     float v = 0.0f;
 
-    for (int i = 0; i < TOT; i++) {
+    int tot = (db_y - qs_x + DLS) / DLS;
+    int wpq = (qs_x + WARP - 1) / WARP;
+
+    for (int i = 0; i < tot; i++) {
         if (t >= QLS) {
             int k = t - QLS;
             Q[k] = (k < qs_x) ? d_qs[k] : 0.0f;
         } else {
-            int k = i * OTS + t;
+            int k = i * DLS + t;
             D[t] = (k < db_y) ? d_db[d * db_y + k] : 0.0f;
         }
 
         __syncthreads();
 
-        for (int j = 0; j < WPQ; j++) {
+        for (int j = 0; j < wpq; j++) {
             if (t >= DLS) {
                 int j1 = j + 1;
-                if (j1 < WPQ) {
+                if (j1 < wpq) {
                     if (t >= QLS) {
                         int k = t - QLS;
                         int h = k + j1 * WARP;
                         Q[k + (j1 % 2) * WARP] = (h < qs_x) ? d_qs[h] : 0.0f;
                     } else {
                         int k = t + j1 * WARP;
-                        int h = i * OTS + k;
-                        D[(k) % blockDim.x] = (h < db_y) ? d_db[d * db_y + h] : 0.0f;
+                        int h = i * DLS + k;
+                        D[(k) % TPB] = (h < db_y) ? d_db[d * db_y + h] : 0.0f;
                     }
                 }
             } else {
                 int q = (j % 2) * WARP;
-                int s = (t + j * WARP) % blockDim.x;
+                int s = (t + j * WARP) % TPB;
                 for (int k = 0; k < WARP; k++) {
                     v += fabsf(D[s + k] - Q[q + k]);
                 }
@@ -46,41 +55,72 @@ __global__ void sad_kernel(float* d_db, float* d_qs, float* d_rs, int db_x, int 
             __syncthreads();
         }
 
-        if (t < DLS && (int k = i * OTS + t) < (db_y - qs_x + 1)) {
+        int k = i * DLS + t;
+        if ((t < DLS) && (k < (db_y - qs_x + 1))) {
             d_rs[k] = v;
         }
     }
 }
 
 // Function to run the CUDA kernel
-void cuda_run(float* d_db, float* d_qs, float* d_rs, int db_x, int db_y, int qs_x, int qs_y, int threadsPerBlock, int nBlocksX, int nBlocksY, int nBlocksZ) {
+void cuda_run(float* d_db, float* d_qs, float* d_rs, int db_x, int db_y, int qs_x, int qs_y, int threadsPerBlock, int nBlocksX, int nBlocksY, int nBlocksZ, float* times) {
     for (int i = 0; i < qs_x; i++) {
+        struct timeval start, end;
+        gettimeofday(&start, NULL);
         sad_kernel<<<dim3(nBlocksX, nBlocksY, nBlocksZ), threadsPerBlock>>>(d_db, d_qs + i * qs_x, d_rs + i * qs_x * db_x, db_x, db_y, qs_y);
+        gettimeofday(&end, NULL);
+        times[i] = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1000000.0;
     }
 }
 
 // Function to run the parallel pattern recognition algorithm
-int par_run(dataset_t* db, dataset_t* queries, dataset_t* results, float* times) {
-    int device;
-    cudaGetDevice(&device) == cudaSuccess ? 0 : return 1;
-    int threadsPerWarp;
-    cudaDeviceGetAttribute(&threadsPerWarp, cudaDevAttrWarpSize, device) == cudaSuccess ? 0 : return 1;
-    int maxBlocksPerSM;
-    cudaDeviceGetAttribute(&maxBlocksPerSM, cudaDevAttrMaxBlocksPerMultiprocessor, device) == cudaSuccess ? 0 : return 1;
-    int maxSharedMemoryPerSM;
-    cudaDeviceGetAttribute(&maxSharedMemoryPerSM, cudaDevAttrMaxSharedMemoryPerMultiprocessor, device) == cudaSuccess ? 0 : return 1;
-    maxSharedMemoryPerSM /= sizeof(float);
-    int maxGridDimX;
-    cudaDeviceGetAttribute(&maxGridDimX, cudaDevAttrMaxGridDimX, device) == cudaSuccess ? 0 : return 1;
-    int maxGridDimY;
-    cudaDeviceGetAttribute(&maxGridDimY, cudaDevAttrMaxGridDimY, device) == cudaSuccess ? 0 : return 1;
-    int maxGridDimZ;
-    cudaDeviceGetAttribute(&maxGridDimZ, cudaDevAttrMaxGridDimZ, device) == cudaSuccess ? 0 : return 1;
-    
-    int maxSharedMemoryPerBlock = ((maxSharedMemoryPerSM / maxBlocksPerSM) / threadsPerWarp) * threadsPerWarp;
-    int threadsPerBlock = maxSharedMemoryPerBlock - 2 * threadsPerWarp;
+int par_run(dataset_t* db, dataset_t* queries, dataset_t* results, dataset_t* times, int n_runs) {
 
-    int nBlocksX = 0, nBlocksY = 0, nBlocksZ = 0;
+    cudaError_t err;
+
+    unsigned int db_x = db->lengths[0];
+    unsigned int db_y = db->lengths[1];
+    unsigned int qs_x = queries->lengths[0];
+    unsigned int qs_y = queries->lengths[1];
+    unsigned int rs_z = results->lengths[2];
+
+    printf("========CUDA========\n");
+    int device;
+    if ((err = cudaGetDevice(&device)) != cudaSuccess)  { printf("DEBUG A %d\n", err); return 1; }
+    printf("Using device %d\n", device);
+    int threadsPerWarp;
+    if ((err = cudaDeviceGetAttribute(&threadsPerWarp, cudaDevAttrWarpSize, device)) != cudaSuccess) { printf("DEBUG B %d\n", err); return 1; }
+    printf("Threads per warp: %d\n", threadsPerWarp);
+    int maxBlocksPerSM;
+    if ((err = cudaDeviceGetAttribute(&maxBlocksPerSM, cudaDevAttrMaxBlocksPerMultiprocessor, device)) != cudaSuccess) { printf("DEBUG C %d\n", err); return 1; }
+    printf("Max blocks per SM: %d\n", maxBlocksPerSM);
+    int maxSharedMemoryPerSM;
+    if ((err = cudaDeviceGetAttribute(&maxSharedMemoryPerSM, cudaDevAttrMaxSharedMemoryPerMultiprocessor, device)) != cudaSuccess) { printf("DEBUG D %d\n", err); return 1; }
+    maxSharedMemoryPerSM /= sizeof(float);
+    printf("Max shared memory per SM: %d\n", maxSharedMemoryPerSM);
+    int maxGridDimX;
+    if ((err = cudaDeviceGetAttribute(&maxGridDimX, cudaDevAttrMaxGridDimX, device)) != cudaSuccess) { printf("DEBUG E %d\n", err); return 1; }
+    printf("Max grid dim X: %d\n", maxGridDimX);
+    int maxGridDimY;
+    if ((err = cudaDeviceGetAttribute(&maxGridDimY, cudaDevAttrMaxGridDimY, device)) != cudaSuccess) { printf("DEBUG F %d\n", err); return 1; }
+    printf("Max grid dim Y: %d\n", maxGridDimY);
+    int maxGridDimZ;
+    if ((err = cudaDeviceGetAttribute(&maxGridDimZ, cudaDevAttrMaxGridDimZ, device)) != cudaSuccess) { printf("DEBUG G %d\n", err); return 1; }
+    printf("Max grid dim Z: %d\n", maxGridDimZ);
+    int maxThreadsPerBlock;
+    if ((err = cudaDeviceGetAttribute(&maxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, device)) != cudaSuccess) { printf("DEBUG H %d\n", err); return 1; }
+    printf("Max threads per block: %d\n", maxThreadsPerBlock);
+    int maxThreadsPerMultiprocessor;
+    if ((err = cudaDeviceGetAttribute(&maxThreadsPerMultiprocessor, cudaDevAttrMaxThreadsPerMultiProcessor, device)) != cudaSuccess) { printf("DEBUG I %d\n", err); return 1;}
+    printf("Max threads per multiprocessor: %d\n", maxThreadsPerMultiprocessor);
+    int maxSharedMemoryPerBlock;
+    if ((err = cudaDeviceGetAttribute(&maxSharedMemoryPerBlock, cudaDevAttrMaxSharedMemoryPerBlock, device)) != cudaSuccess) { printf("DEBUG J %d\n", err); return 1; }
+    maxSharedMemoryPerBlock /= sizeof(float);
+    printf("Max shared memory per block: %d\n", maxSharedMemoryPerBlock);
+    printf("Max shared memory per SM / Max blocks per SM: %d\n", maxSharedMemoryPerSM / maxBlocksPerSM);
+    printf("====================")
+
+    int nBlocksX = 1, nBlocksY = 1, nBlocksZ = 1;
     if (db_x <= maxGridDimX) {
         nBlocksX = db_x;
     } else {
@@ -96,67 +136,40 @@ int par_run(dataset_t* db, dataset_t* queries, dataset_t* results, float* times)
             }
         }
     }
-
-    __constant__ int WARP;
-    cudaMemcpyToSymbol(WARP, &threadsPerWarp, sizeof(int)) == cudaSuccess ? 0 : return 1;
-
-    int warpsPerBlock = threadsPerBlock / threadsPerWarp;
-    __constant__ int WPB;
-    cudaMemcpyToSymbol(WPB, &warpsPerBlock, sizeof(int)) == cudaSuccess ? 0 : return 1;
-
-    int warpsPerQuery = (qs_y + threadsPerWarp - 1) / threadsPerWarp;
-    __constant__ int WPQ;
-    cudaMemcpyToSymbol(WPQ, &warpsPerQuery, sizeof(int)) == cudaSuccess ? 0 : return 1;
-    
-    int dataLoadersStart = threadsPerBlock - 2 * threadsPerWarp;
-    __constant__ int DLS;
-    cudaMemcpyToSymbol(DLS, &dataLoadersStart, sizeof(int)) == cudaSuccess ? 0 : return 1;
-    
-    int queryLoadersStart = threadsPerBlock - threadsPerWarp;
-    __constant__ int QLS;
-    cudaMemcpyToSymbol(QLS, &queryLoadersStart, sizeof(int)) == cudaSuccess ? 0 : return 1;
-    
-    int totalOutputTiles = (db_y - qs_y + dataLoadersStart) / dataLoadersStart;
-    __constant__ int TOT;
-    cudaMemcpyToSymbol(TOT, &totalOutputTiles, sizeof(int)) == cudaSuccess ? 0 : return 1;
-    
-    unsigned int db_x = db->lengths[0];
-    unsigned int db_y = db->lengths[1];
-    unsigned int qs_x = queries->lengths[0];
-    unsigned int qs_y = queries->lengths[1];
-    unsigned int rs_z = results->lengths[2];
+    printf("Blocks per dimension: %d x %d x %d\n", nBlocksX, nBlocksY, nBlocksZ);
 
     // Allocate device memory
     float *d_db, *d_qs, *d_rs;
-    cudaMalloc((void**)&d_db, db_x * db_y * sizeof(float)) == cudaSuccess ? 0 : return 1;
-    cudaMalloc((void**)&d_qs, qs_x * qs_y * sizeof(float)) == cudaSuccess ? 0 : return 1;
-    cudaMalloc((void**)&d_rs, qs_x * db_x * rs_z * sizeof(float)) == cudaSuccess ? 0 : return 1;
+    if ((err = cudaMalloc((void**)&d_db, db_x * db_y * sizeof(float))) != cudaSuccess) { printf("DEBUG O %d\n", err); return 1; }
+    if ((err = cudaMalloc((void**)&d_qs, qs_x * qs_y * sizeof(float))) != cudaSuccess) { printf("DEBUG P %d\n", err); return 1; }
+    if ((err = cudaMalloc((void**)&d_rs, qs_x * db_x * rs_z * sizeof(float))) != cudaSuccess) { printf("DEBUG Q %d\n", err); return 1; }
 
     // Copy data to device
     for (int i = 0; i < db_x; i++) {
-        cudaMemcpy(d_db + i * db_x, db->data + i * db_x, db_y * sizeof(float), cudaMemcpyHostToDevice) == cudaSuccess ? 0 : return 1;
+        if ((err = cudaMemcpy(d_db + i * db_y, ((float**)db->data)[i], db_y * sizeof(float), cudaMemcpyHostToDevice)) != cudaSuccess) { printf("DEBUG R %d\n", err); return 1; }
     }
     for (int i = 0; i < qs_x; i++) {
-        cudaMemcpy(d_qs + i * qs_x, queries->data + i * qs_x, qs_y * sizeof(float), cudaMemcpyHostToDevice) == cudaSuccess ? 0 : return 1;
+        if ((err = cudaMemcpy(d_qs + i * qs_y, ((float**)queries->data)[i], qs_y * sizeof(float), cudaMemcpyHostToDevice)) != cudaSuccess) { printf("DEBUG S %d\n", err); return 1; }
     }
 
     // Run the kernel multiple times
     for (int i = 0; i < n_runs; i++) {
-        cuda_run(d_db, d_qs, d_rs, db_x, db_y, qs_x, qs_y, threadsPerBlock, nBlocksX, nBlocksY, nBlocksZ);
-        cudaDeviceSynchronize() == cudaSuccess ? 0 : return 1;
+        //cuda_run(d_db, d_qs, d_rs, db_x, db_y, qs_x, qs_y, threadsPerBlock, nBlocksX, nBlocksY, nBlocksZ);
+        cuda_run(d_db, d_qs, d_rs, db_x, db_y, qs_x, qs_y, TPB, nBlocksX, nBlocksY, nBlocksZ, ((float**)times->data)[i]);
+        if ((err = cudaDeviceSynchronize()) != cudaSuccess) { printf("DEBUG T %d\n", err); return 1; }
     }
 
     // Copy results back to host
     for (int i = 0; i < qs_x; i++) {
         for (int j = 0; j < db_x; j++) {
-            cudaMemcpy(results->data + i * qs_x * db_x + j * db_x, d_results + i * qs_x * db_x + j * db_x, rs_z * sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess ? 0 : return 1;
+            if ((err = cudaMemcpy(((float***)results->data)[i][j], d_rs + i * qs_x * db_x + j * db_x, rs_z * sizeof(float), cudaMemcpyDeviceToHost)) != cudaSuccess) { printf("DEBUG U %d\n", err); return 1; }
         }
     }
 
     // Free device memory
-    cudaFree(d_db) == cudaSuccess ? 0 : return 1;
-    cudaFree(d_qs) == cudaSuccess ? 0 : return 1;
-    cudaFree(d_rs) == cudaSuccess ? 0 : return 1;
+    if ((err = cudaFree(d_db)) != cudaSuccess) { printf("DEBUG V %d\n", err); return 1; }
+    if ((err = cudaFree(d_qs)) != cudaSuccess) { printf("DEBUG W %d\n", err); return 1; }
+    if ((err = cudaFree(d_rs)) != cudaSuccess) { printf("DEBUG X %d\n", err); return 1; }
 
     return 0;
 }
@@ -170,8 +183,8 @@ int main(int argc, char* argv[]) {
     printf("Initialization...\n");
 
     // Load database
-    printf("Loading data from %s...\n", "data/db.csv");
-    dataset_t* db = load_data("data/db.csv");
+    printf("Loading data from %s...\n", "db.csv");
+    dataset_t* db = load_data("db.csv");
     if (!db) {
         perror("Failed to load data");
         return 1;
@@ -179,8 +192,8 @@ int main(int argc, char* argv[]) {
     printf("Loaded %d elements with %d values\n", db->lengths[0], db->lengths[1]);
 
     // Load queries
-    printf("Loading data from %s...\n", "data/queries.csv");
-    dataset_t* queries = load_data("data/queries.csv");
+    printf("Loading data from %s...\n", "queries.csv");
+    dataset_t* queries = load_data("queries.csv");
     if (!queries) {
         perror("Failed to load queries");
         free_dataset(db);
@@ -228,11 +241,11 @@ int main(int argc, char* argv[]) {
 
     // Run the parallel algorithm multiple times
     printf("Running %d times...\n", n_runs);
-    par_run(db, queries, results, ((float**)(times->data))[i], n_runs) == 0 ? 0 : printf("Failed to run parallel algorithm\n");
+    par_run(db, queries, results, times, n_runs) == 0 ? 0 : printf("Failed to run parallel algorithm\n");
 
     // Dump timing data to file
-    printf("Dumping timing data to %s...\n", "data/par_times.csv");
-    dump_dataset(times, "data/par_times.csv");
+    printf("Dumping timing data to %s...\n", "par_times.csv");
+    dump_dataset(times, "par_times.csv");
 
     // Clean up
     printf("Cleaning...\n");

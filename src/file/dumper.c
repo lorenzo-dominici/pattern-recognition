@@ -30,6 +30,12 @@ void dump_dataset(dataset_t* data, char* filename) {
         file = fopen(filename, "w");
     }
 
+    // Check if file was successfully opened
+    if (!file) {
+        perror("Failed to open file");
+        return;
+    }
+
     // Write header if necessary
     if (header) {
         for (int i = 0; i < data->lengths[axis]; i++) {
@@ -38,13 +44,6 @@ void dump_dataset(dataset_t* data, char* filename) {
                 fprintf(file, ",");
             }
         }
-        fprintf(file, "\n");
-    }
-
-    // Check if file was successfully opened
-    if (!file) {
-        perror("Failed to open file");
-        return;
     }
 
     // Write data to file based on axis
@@ -54,9 +53,10 @@ void dump_dataset(dataset_t* data, char* filename) {
                 fprintf(file, "%f", ((float**)(data->data))[i][j]);
                 if (j < data->lengths[1] - 1) {
                     fprintf(file, ",");
+                } else {
+                    fprintf(file, "\n");
                 }
             }
-            fprintf(file, "\n");
         }
     } else {
         for (int j = 0; j < data->lengths[1]; j++) {
@@ -64,9 +64,10 @@ void dump_dataset(dataset_t* data, char* filename) {
                 fprintf(file, "%f", ((float**)(data->data))[i][j]);
                 if (i < data->lengths[0] - 1) {
                     fprintf(file, ",");
+                } else {
+                    fprintf(file, "\n");
                 }
             }
-            fprintf(file, "\n");
         }
     }
 
