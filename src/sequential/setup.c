@@ -4,6 +4,7 @@
 #include "setup.h"
 
 // Function to define results dataset based on queries and db datasets
+/*
 void define_results(dataset_t* queries, dataset_t* db, dataset_t* results) {
     // Check if the size of queries and db datasets is 2
     if (queries->size != 2 || db->size != 2) {
@@ -60,6 +61,7 @@ void define_results(dataset_t* queries, dataset_t* db, dataset_t* results) {
         }
     }
 }
+*/
 
 // Function to define times dataset based on queries dataset and number of runs
 void define_times(dataset_t* queries, unsigned int n_runs, dataset_t* times) {

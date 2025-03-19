@@ -14,6 +14,6 @@ void sad(float* ts, float* query, int ts_length, int query_length, float* result
             distance += fabs(ts[i + j] - query[j]);
         }
         // Store the computed distance in the result array
-        result[i] = distance;
+        *result = distance;
     }
 }

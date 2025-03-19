@@ -118,7 +118,6 @@ int par_run(dataset_t* db, dataset_t* queries, dataset_t* results, dataset_t* ti
     maxSharedMemoryPerBlock /= sizeof(float);
     printf("Max shared memory per block: %d\n", maxSharedMemoryPerBlock);
     printf("Max shared memory per SM / Max blocks per SM: %d\n", maxSharedMemoryPerSM / maxBlocksPerSM);
-    printf("====================")
 
     int nBlocksX = 1, nBlocksY = 1, nBlocksZ = 1;
     if (db_x <= maxGridDimX) {
@@ -137,6 +136,8 @@ int par_run(dataset_t* db, dataset_t* queries, dataset_t* results, dataset_t* ti
         }
     }
     printf("Blocks per dimension: %d x %d x %d\n", nBlocksX, nBlocksY, nBlocksZ);
+
+    printf("====================");
 
     // Allocate device memory
     float *d_db, *d_qs, *d_rs;

@@ -10,7 +10,7 @@
 #include "sad.h"
 
 // Function to run the sequential algorithm
-void seq_run(dataset_t* db, dataset_t* queries, dataset_t* results, float* times) {
+void seq_run(dataset_t* db, dataset_t* queries, /*dataset_t**/ float* result, float* times) {
     float avg_time = 0;
     LARGE_INTEGER frequency, start, end;
     QueryPerformanceFrequency(&frequency);
@@ -23,7 +23,7 @@ void seq_run(dataset_t* db, dataset_t* queries, dataset_t* results, float* times
         // Loop through each database entry
         for (int j = 0; j < db->lengths[0]; j++) {
             // Perform the SAD operation
-            sad(((float**)(db->data))[j], ((float**)(queries->data))[i], db->lengths[1], queries->lengths[1], ((float***)(results->data))[i][j]);
+            sad(((float**)(db->data))[j], ((float**)(queries->data))[i], db->lengths[1], queries->lengths[1], result /*((float***)(results->data))[i][j]*/);
         }
         
         QueryPerformanceCounter(&end);
@@ -58,8 +58,8 @@ int main(int argc, char* argv[]) {
     printf("Initialization...\n");
 
     // Load database
-    printf("Loading data from %s...\n", "data/db.csv");
-    dataset_t* db = load_data("data/db.csv");
+    printf("Loading data from %s...\n", "data/dba.csv");
+    dataset_t* db = load_data("data/dba.csv");
     if (!db) {
         perror("Failed to load data");
         return 1;
@@ -78,6 +78,8 @@ int main(int argc, char* argv[]) {
 
     // Define results dataset
     printf("Defining results...\n");
+    float* result = (float*)malloc(sizeof(float));
+    /*
     dataset_t* results = (dataset_t*)malloc(sizeof(dataset_t));
     if (!results) {
         perror("Failed to allocate memory for results");
@@ -93,13 +95,14 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     printf("Results defined with dimensions %d x %d x %d\n", results->lengths[0], results->lengths[1], results->lengths[2]);
+    */
 
     // Define times dataset
     printf("Defining times...\n");
     dataset_t* times = (dataset_t*)malloc(sizeof(dataset_t));
     if (!times) {
         perror("Failed to allocate memory for times");
-        free_dataset(results);
+        free(result); // free_dataset(results);
         free_dataset(queries);
         free_dataset(db);
         return 1;
@@ -107,7 +110,7 @@ int main(int argc, char* argv[]) {
     define_times(queries, n_runs, times);
     if (!is_defined(times)) {
         perror("Failed to define times");
-        free_dataset(results);
+        free(result); // free_dataset(results);
         free_dataset(queries);
         free_dataset(db);
         return 1;
@@ -117,8 +120,10 @@ int main(int argc, char* argv[]) {
     // Run the sequential algorithm multiple times
     printf("Running %d times...\n", n_runs);
     for (int i = 0; i < n_runs; i++) {
-        seq_run(db, queries, results, ((float**)(times->data))[i]);
+        seq_run(db, queries, result /*results*/, ((float**)(times->data))[i]);
     }
+
+    printf("Result: %f\n", *result);
 
     // Dump timing data to file
     printf("Dumping timing data to %s...\n", "data/seq_times.csv");
@@ -127,7 +132,7 @@ int main(int argc, char* argv[]) {
     // Clean up
     printf("Cleaning...\n");
     free_dataset(times);
-    free_dataset(results);
+    free(result); //free_dataset(results);
     free_dataset(queries);
     free_dataset(db);
 
