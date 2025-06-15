@@ -58,6 +58,7 @@ __global__ void sad_kernel(float* d_db, float* d_qs, float* d_rs, int db_x, int 
         int k = i * DLS + t;
         if ((t < DLS) && (k < (db_y - qs_x + 1))) {
             d_rs[k] = v;
+            v = 0.0f;
         }
     }
 }
